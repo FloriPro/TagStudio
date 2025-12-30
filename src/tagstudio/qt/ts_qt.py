@@ -1343,7 +1343,12 @@ class QtDriver(DriverMixin, QObject):
             return
 
         if query_type == "tag":
-            completion_list = list(map(lambda x: prefix + "tag:" + x.name, self.lib.tags))
+            completion_list = list(
+                map(
+                    lambda x: prefix + "tag:" + (f'"{x.name}"' if " " in x.name else x.name),
+                    self.lib.tags,
+                )
+            )
         elif query_type == "tag_id":
             completion_list = list(map(lambda x: prefix + "tag_id:" + str(x.id), self.lib.tags))
         elif query_type == "path":
