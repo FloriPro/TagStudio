@@ -142,3 +142,4 @@ class FieldID(Enum):
     GUEST_ARTIST = DefaultField(id=28, name="Guest Artist", type=FieldTypeEnum.TEXT_LINE)
     COMPOSER = DefaultField(id=29, name="Composer", type=FieldTypeEnum.TEXT_LINE)
     COMMENTS = DefaultField(id=30, name="Comments", type=FieldTypeEnum.TEXT_LINE)
+    OCR_TEXT = DefaultField(id=31, name="OCR Text", type=FieldTypeEnum.TEXT_BOX, is_default=True)

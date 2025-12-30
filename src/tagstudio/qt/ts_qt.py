@@ -86,6 +86,7 @@ from tagstudio.qt.mixed.folders_to_tags import FoldersToTagsModal
 from tagstudio.qt.mixed.item_thumb import BadgeType
 from tagstudio.qt.mixed.migration_modal import JsonMigrationModal
 from tagstudio.qt.mixed.progress_bar import ProgressWidget
+from tagstudio.qt.mixed.run_ocr import OcrRunmodal
 from tagstudio.qt.mixed.settings_panel import SettingsPanel
 from tagstudio.qt.mixed.tag_color_manager import TagColorManager
 from tagstudio.qt.mixed.tag_database import TagDatabasePanel
@@ -186,6 +187,7 @@ class QtDriver(DriverMixin, QObject):
     ignore_modal: PanelModal | None = None
     add_tag_modal: PanelModal | None = None
     folders_modal: FoldersToTagsModal
+    ocr_modal: OcrRunmodal
     about_modal: AboutModal
     unlinked_modal: FixUnlinkedEntriesModal
     ignored_modal: FixIgnoredEntriesModal
@@ -548,6 +550,14 @@ class QtDriver(DriverMixin, QObject):
             create_folders_tags_modal
         )
 
+        def create_run_ocr_modal():
+            logger.debug("[Menu] Run OCR Macro triggered")
+            if not hasattr(self, "ocr_modal"):
+                self.ocr_modal = OcrRunmodal(self.lib, self)
+            self.ocr_modal.show()
+
+        self.main_window.menu_bar.run_ocr_macro_action.triggered.connect(create_run_ocr_modal)
+
         # endregion
 
         # region Help Menu ============================================================
@@ -784,6 +794,7 @@ class QtDriver(DriverMixin, QObject):
             self.main_window.menu_bar.fix_dupe_files_action.setEnabled(False)
             self.main_window.menu_bar.clear_thumb_cache_action.setEnabled(False)
             self.main_window.menu_bar.folders_to_tags_action.setEnabled(False)
+            self.main_window.menu_bar.run_ocr_macro_action.setEnabled(False)
             self.main_window.menu_bar.library_info_action.setEnabled(False)
         except AttributeError:
             logger.warning(
@@ -1659,6 +1670,7 @@ class QtDriver(DriverMixin, QObject):
         self.main_window.menu_bar.fix_dupe_files_action.setEnabled(True)
         self.main_window.menu_bar.clear_thumb_cache_action.setEnabled(True)
         self.main_window.menu_bar.folders_to_tags_action.setEnabled(True)
+        self.main_window.menu_bar.run_ocr_macro_action.setEnabled(True)
         self.main_window.menu_bar.library_info_action.setEnabled(True)
 
         self.main_window.preview_panel.set_selection(self.selected)

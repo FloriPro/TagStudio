@@ -2015,3 +2015,30 @@ class Library:
                 session.expunge(result)
 
         return "" if not result else result.name
+
+    def get_all_entries_without_ocr(self) -> list[Entry]:
+        """Return every Entry in the library."""
+        with Session(self.engine) as session:
+            entries = session.scalars(
+                select(Entry)
+                .where(
+                    Entry.suffix.in_(
+                        [
+                            "jpg",
+                            "png",
+                            "jpeg",
+                            "tiff",
+                            "bmp",
+                            "gif",
+                            "webp",
+                        ]
+                    )
+                )
+                .where(~Entry.text_fields.any(TextField.type_key == "OCR_TEXT"))
+                .order_by(asc(Entry.id))
+            )
+            entry_list: list[Entry] = []
+            for entry in entries:
+                session.expunge(entry)
+                entry_list.append(entry)
+            return entry_list

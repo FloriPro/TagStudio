@@ -91,6 +91,7 @@ class MainMenuBar(QMenuBar):
 
     macros_menu: QMenu
     folders_to_tags_action: QAction
+    run_ocr_macro_action: QAction
 
     help_menu: QMenu
     about_action: QAction
@@ -388,6 +389,10 @@ class MainMenuBar(QMenuBar):
         self.folders_to_tags_action = QAction(Translations["menu.macros.folders_to_tags"], self)
         self.folders_to_tags_action.setEnabled(False)
         self.macros_menu.addAction(self.folders_to_tags_action)
+
+        self.run_ocr_macro_action = QAction("Run OCR", self)
+        self.run_ocr_macro_action.setEnabled(False)
+        self.macros_menu.addAction(self.run_ocr_macro_action)
 
         assign_mnemonics(self.macros_menu)
         self.addMenu(self.macros_menu)
