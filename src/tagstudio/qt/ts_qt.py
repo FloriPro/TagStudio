@@ -1328,6 +1328,7 @@ class QtDriver(DriverMixin, QObject):
                 "path:",
                 "tag:",
                 "tag_id:",
+                "fuzzy:",
                 "special:untagged",
             ]
             self.main_window.search_field_completion_list.setStringList(completion_list)
