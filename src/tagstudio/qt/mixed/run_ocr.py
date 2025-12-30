@@ -392,7 +392,7 @@ class EasyOcrWorker(OCRRunner):
         return out_text
 
 
-def test():
+def local_test():
     import os
 
     import easyocr
@@ -424,3 +424,7 @@ def test():
         with open(f"{file_path}.txt", "w", encoding="utf-8") as f:
             f.write(text)
         logger.error(f"OCR text saved to: {file_path}.txt")
+
+
+if __name__ == "__main__":
+    local_test()
