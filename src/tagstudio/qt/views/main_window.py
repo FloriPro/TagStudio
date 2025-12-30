@@ -48,6 +48,7 @@ from tagstudio.qt.platform_strings import trash_term
 from tagstudio.qt.resource_manager import ResourceManager
 from tagstudio.qt.thumb_grid_layout import ThumbGridLayout
 from tagstudio.qt.translations import Translations
+from tagstudio.qt.views.search_field import BetterSearchField
 
 # Only import for type checking/autocompletion, will not be imported at runtime.
 if typing.TYPE_CHECKING:
@@ -461,8 +462,6 @@ class MainWindow(QMainWindow):
         self.back_button: QPushButton
         self.forward_button: QPushButton
         self.search_field: QLineEdit
-        self.search_field_completion_list: QStringListModel
-        self.search_field_completer: QCompleter
         self.search_button: QPushButton
 
         # initialized in setup_extra_input_bar
@@ -558,16 +557,7 @@ class MainWindow(QMainWindow):
         self.forward_button.setMaximumSize(QSize(32, 16777215))
         self.search_bar_layout.addWidget(self.forward_button)
 
-        self.search_field = QLineEdit(self.central_widget)
-        self.search_field.setPlaceholderText(Translations["home.search_entries"])
-        self.search_field.setObjectName("search_field")
-        self.search_field.setMinimumSize(QSize(0, 32))
-        self.search_field_completion_list = QStringListModel()
-        self.search_field_completer = QCompleter(
-            self.search_field_completion_list, self.search_field
-        )
-        self.search_field_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.search_field.setCompleter(self.search_field_completer)
+        self.search_field = BetterSearchField()
         self.search_bar_layout.addWidget(self.search_field)
 
         self.search_button = QPushButton(Translations["home.search"], self.central_widget)
