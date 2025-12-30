@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.operators import ilike_op
 
 from tagstudio.core.library.alchemy.constants import TAG_CHILDREN_ID_QUERY
+from tagstudio.core.library.alchemy.fields import TextField
 from tagstudio.core.library.alchemy.joins import TagEntry
 from tagstudio.core.library.alchemy.models import Entry, Tag, TagAlias
 from tagstudio.core.media_types import FILETYPE_EQUIVALENTS, MediaCategories
@@ -108,6 +109,22 @@ class SQLBoolExpressionBuilder(BaseVisitor[ColumnElement[bool]]):
         elif node.type == ConstraintType.Special:  # noqa: SIM102 unnecessary once there is a second special constraint
             if node.value.lower() == "untagged":
                 return ~Entry.id.in_(select(Entry.id).join(TagEntry))
+        elif node.type == ConstraintType.Fuzzy:
+            tag_ids_can_match = self.__get_levenshtein_tag_ids(node.value)
+
+            logger.debug(tag_ids_can_match)
+
+            prescanned_entries = self.__scan_text_fields_for_fuzzy_matches(node.value)
+
+            # fuzzy search matches: tags, path/filename, text fields
+            return or_(
+                self.__entry_has_any_tags(tag_ids_can_match),
+                # path is also fuzzy similarity matched
+                func.part_fuzzy_similarity(func.lower(Entry.path), node.value.lower()) > 0.7,
+                # check for all entries in text_fields table, if any text field matches
+                # (use prescanned entries)
+                Entry.id.in_(prescanned_entries),
+            )
 
         # raise exception if Constraint stays unhandled
         raise NotImplementedError("This type of constraint is not implemented yet")
@@ -177,6 +194,8 @@ class SQLBoolExpressionBuilder(BaseVisitor[ColumnElement[bool]]):
                         pass
                     case ConstraintType.Special:
                         pass
+                    case ConstraintType.Fuzzy:
+                        pass
                     case _:
                         raise NotImplementedError(f"Unhandled constraint: '{term.type}'")
 
@@ -198,3 +217,54 @@ class SQLBoolExpressionBuilder(BaseVisitor[ColumnElement[bool]]):
         return Entry.id.in_(
             select(TagEntry.entry_id).where(TagEntry.tag_id.in_(tag_ids)).distinct()
         )
+
+    def __get_levenshtein_tag_ids(self, value, cutoff: float = 0.7) -> list[int]:
+        value = value.lower()
+        """Get tag ids that match the value using Levenshtein distance."""
+        with Session(self.lib.engine) as session:
+            tag_ids = list(
+                session.scalars(
+                    select(Tag.id, Tag.name).where(
+                        func.fuzzy_similarity(func.lower(Tag.name), value) > cutoff
+                    )
+                )
+            )
+            logger.debug(
+                f'Fuzzy Tag Constraint "{value}" matched {len(tag_ids)} tags '
+                f"within cutoff {cutoff}",
+                tag_names=[tag_id for tag_id in tag_ids],
+            )
+
+            # also add all children of matched tags
+            all_tag_ids: set[int] = set()
+            for tag_id in tag_ids:
+                all_tag_ids.add(tag_id)
+                all_tag_ids.update(
+                    set(
+                        session.scalars(
+                            TAG_CHILDREN_ID_QUERY,
+                            {"tag_id": tag_id},
+                        )
+                    )
+                )
+            tag_ids = list(all_tag_ids)
+
+            return tag_ids
+
+    def __scan_text_fields_for_fuzzy_matches(self, value):
+        value = value.lower()
+        """Scan all text fields for fuzzy matches to the value."""
+        with Session(self.lib.engine) as session:
+            entry_ids = list(
+                session.scalars(
+                    select(TextField.entry_id)
+                    .where(func.part_fuzzy_similarity(func.lower(TextField.value), value) > 0.7)
+                    .distinct()
+                )
+            )
+            logger.debug(
+                f'Fuzzy Text Field scan for "{value}" matched {len(entry_ids)} entries '
+                f"within cutoff 0.7",
+                entry_ids=[entry_id for entry_id in entry_ids],
+            )
+            return entry_ids

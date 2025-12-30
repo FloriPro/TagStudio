@@ -19,7 +19,10 @@ from tagstudio.core.library.alchemy.fields import (
     DatetimeField,
     TextField,
 )
+from tagstudio.core.library.alchemy.functions import init_levenshtein
 from tagstudio.core.library.alchemy.joins import TagParent
+
+init_levenshtein()
 
 
 class Namespace(Base):
