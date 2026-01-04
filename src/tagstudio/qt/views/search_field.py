@@ -1,434 +1,684 @@
-from dataclasses import dataclass
-from typing import Literal, cast
-
 import structlog
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QWidget, QLineEdit, QSizePolicy, QLabel
-from PySide6.QtCore import Signal, QSize, Qt
-
-from tagstudio.core.query_lang.ast import AST
-from tagstudio.core.query_lang.parser import Parser
-
-from PySide6.QtWidgets import QHBoxLayout
+from PySide6.QtCore import QMimeData, QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QDrag, QMouseEvent
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QVBoxLayout, QWidget
 
 logger = structlog.get_logger(__name__)
 
 
-class SearchInputType:
-    color: QColor
+def all_operations():
+    return [AndOperationDesc, OrOperationDesc, NotOperationDesc, RootOperation]
 
 
-@dataclass(frozen=True)
-class LiteralInput(SearchInputType):
-    value: str
-    color = QColor.fromRgb(0x32A852)
+class OperationDesc:
+    in_preview = True
+    max_inputs = 0
+    min_inputs = 0
+    show_text = True
+    text = "ERROR"
+    color = QColor(255, 0, 255)
+    operations: list["OperationDesc | UserInput"] = []
+    widget: "OperationView | None" = None
+    parent_widget: "OperationView | None" = None
+
+    def __init__(self, operations=None) -> None:
+        # these are the inputs to this operation
+        if operations is None:
+            operations = []
+
+        self.operations = operations
+        if len(operations) < self.min_inputs:
+            for _ in range(self.min_inputs - len(operations)):
+                self.operations.append(UserInput())
+
+    def get_widget(self, preview=False, parent=None, parent_view=None) -> "OperationView":
+        if parent_view is not None:
+            self.parent_widget = parent_view
+        if self.widget is None:
+            self.widget = OperationView(operation_desc=self, preview=preview, parent=parent)
+        if self.widget.parent() != parent and parent is not None:
+            logger.debug("Reparenting widget", old_parent=self.widget.parent(), new_parent=parent)
+            self.widget.setParent(parent)
+        return self.widget
 
 
-@dataclass(frozen=True)
-class AssignmentInput(SearchInputType):
-    key: str
-    value: str
-    color = QColor.fromRgb(0x3273A8)
+class AndOperationDesc(OperationDesc):
+    in_preview = True
+    max_inputs = -1  # No maximum
+    min_inputs = 2
+    show_text = True
+    text = "AND"
+    color = QColor(22, 181, 40)
 
 
-@dataclass(frozen=True)
-class OperationInput(SearchInputType):
-    operation: Literal["AND", "OR", "NOT"]
-    operands: list["BetterSearchField"]
-    color = QColor.fromRgb(0xA83232)
+class OrOperationDesc(OperationDesc):
+    in_preview = True
+    max_inputs = -1  # No maximum
+    min_inputs = 2
+    show_text = True
+    text = "OR"
+    color = QColor(255, 140, 0)
 
 
-@dataclass(frozen=True)
-class SearchFieldToken:
-    value: str
-    type: Literal["string", "quoted_string"]
+class NotOperationDesc(OperationDesc):
+    in_preview = True
+    max_inputs = 1
+    min_inputs = 1
+    show_text = True
+    text = "NOT"
+    color = QColor(200, 30, 30)
 
 
-PRECEDENCE = [
-    "NOT",
-    "AND",
-    "OR",
-]
+class RootOperation(OperationDesc):
+    in_preview = False
+    max_inputs = -1  # No maximum
+    min_inputs = 1
+    show_text = False
+    text = "ROOT"
+    color = QColor(50, 50, 50)
 
 
-class BetterSearchFieldView(QWidget):
-    textChanged: Signal = Signal(str)
-    returnPressed: Signal = Signal()
+class UserInput:
+    value: str = ""
 
-    operation: SearchInputType | None = None  # "AND" | "OR" | None
 
-    def __init__(self, parent=None, data: SearchInputType | None = None, focus: bool = False):
-        super().__init__(parent)
+class UserInputLineEdit(QLineEdit):
+    def __init__(
+        self, placeholder: QLabel, user_input: UserInput, index: int, parent: "OperationView" = None
+    ):
+        super().__init__(parent.content)
+        self.parent_operation_view = parent
+        self.placeholder = placeholder
+        self.user_input = user_input
+        self.index = index
 
-        self.setMinimumSize(QSize(50, 40))
-        # Allow height to expand when needed
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        og_text = user_input.value
+        self.setText(og_text)
+        self.setMinimumSize(50, 20)
+        self.setStyleSheet("""
+                            background-color: white;
+                            color: black;
+                            border: 2px dashed gray;
+                            border-radius: 4px;
+                            padding: 0px;
+                            margin: 0px;
+                            """)
 
-        self.setLayout(QHBoxLayout(self))
-        self.layout().setContentsMargins(6, 6, 6, 6)
-        self.layout().setSpacing(6)
+        # make line_edit not use up all available space, but be only as wide as its content
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.adjustSize()
 
-        # Container for the actual view with proper height expansion
-        self.actual_view_container = QWidget(self)
-        self.actual_view_container.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
-        )
-        self.actual_view = QHBoxLayout(self.actual_view_container)
-        self.actual_view.setContentsMargins(0, 0, 0, 0)
-        self.actual_view.setSpacing(6)
-        self.actual_view.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.layout().addWidget(self.actual_view_container)
+        self.finished_input = False
 
-        # Input field - initially hidden, shown on demand
-        self.inputField = QLineEdit(self)
-        self.inputField.setMinimumSize(QSize(10, 32))
-        self.inputField.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.inputField.setStyleSheet("""
-            QLineEdit {
-                border: 1px solid #999;
-                border-radius: 4px;
-                padding: 4px 8px;
-                background-color: white;
-                color: black;
-            }
-            QLineEdit:focus {
-                border: 2px solid #0078d4;
-            }
-        """)
-        self.inputField.textChanged.connect(self.textChanged)
-        self.inputField.returnPressed.connect(self.returnPressed)
-        # _text_changed connection is handled in subclass
-        self.inputField.hide()  # Hide by default
-        self.layout().addWidget(self.inputField)
+        self.editingFinished.connect(self.finish_input)
+        self.returnPressed.connect(self.finish_input)
+        self.textChanged.connect(self.text_updated)
 
-        self.focus_when_shown = focus
-        self._updateStyle()
-
-        if data is not None:
-            self.operation = data
-            self.display()
-        else:
-            # Show input field initially if no data
-            self.inputField.show()
-
-    def _updateStyle(self):
-        """Update the widget style including background color"""
-        if self.operation is not None:
-            color = self.operation.color
-            # Lighten the color for better visibility
-            bg_color = f"rgba({color.red()}, {color.green()}, {color.blue()}, 0.2)"
-            border_color = f"rgb({color.red()}, {color.green()}, {color.blue()})"
-            self.setStyleSheet(f"""
-                QWidget {{
-                    border: 2px solid {border_color};
-                    border-radius: 6px;
-                    background-color: {bg_color};
-                }}
-            """)
-        else:
-            self.setStyleSheet("""
-                QWidget {
-                    border: 2px solid #ccc;
-                    border-radius: 6px;
-                    background-color: #f8f8f8;
-                }
-            """)
-
-    def mousePressEvent(self, event):
-        """Show input field when clicking on the widget"""
-        super().mousePressEvent(event)
-        if not self.inputField.isVisible():
-            self.inputField.show()
-            self.inputField.setFocus()
-
-    def focusOutEvent(self, event):
-        """Hide input field when it loses focus and is empty"""
-        super().focusOutEvent(event)
-        if self.inputField.isVisible() and not self.inputField.text().strip():
-            self.inputField.hide()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if self.focus_when_shown:
-            self.inputField.show()
-            self.inputField.setFocus()
-            self.focus_when_shown = False
-
-    def display(self):
-        if self.operation is None:
-            # No operation to display, just update style
-            self._updateStyle()
+    def finish_input(self):
+        if self.finished_input:
             return
-        self.clear()
+        self.finished_input = True
+        self.user_input.value = self.text()
+        new_placeholder = self.parent_operation_view.none_operation()
+        new_placeholder.setText(self.user_input.value)
+        self.placeholder = new_placeholder
+        self.parent_operation_view.content_layout.replaceWidget(self, new_placeholder)
+        self.setParent(None)
+        self.deleteLater()
 
-        # Recreate widgets from operation data to avoid deleted widget issues
-        match self.operation:
-            case LiteralInput(value=value):
-                label = QLabel(value, self.actual_view_container)
-                label.setMinimumHeight(28)
-                label.setStyleSheet("""
-                    QLabel {
-                        padding: 6px 12px;
-                        border: 2px solid #2d8a3d;
-                        border-radius: 4px;
-                        background-color: #e8f5e9;
-                        color: #1b5e20;
-                        font-weight: 600;
-                    }
-                """)
-                label.setCursor(Qt.CursorShape.PointingHandCursor)
-                self.actual_view.addWidget(label)
-            case AssignmentInput(key=key, value=value):
-                # Show as clickable labels
-                key_label = QLabel(key, self.actual_view_container)
-                key_label.setMinimumHeight(28)
-                key_label.setStyleSheet("""
-                    QLabel {
-                        padding: 6px 12px;
-                        border: 2px solid #0078d4;
-                        border-radius: 4px;
-                        background-color: #e3f2fd;
-                        color: #01579b;
-                        font-weight: 600;
-                    }
-                """)
-                key_label.setCursor(Qt.CursorShape.PointingHandCursor)
+    def update_line_width(self):
+        self.setFixedWidth(
+            max(
+                self.fontMetrics().horizontalAdvance(self.text()) + 10,
+                50,
+            )
+        )
 
-                colon_label = QLabel(":", self.actual_view_container)
-                colon_label.setStyleSheet(
-                    "padding: 0 4px; font-weight: bold; font-size: 16px; color: black;"
+    def text_updated(self, new_text: str):
+        self.update_line_width()
+        self.adjustSize()
+        self.user_input.value = new_text
+        self.parent_operation_view.check_filled_positions()
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        # if a operationView is dragged into this input,
+        # finish input and replace with operationView
+
+        self.finish_input()
+        OperationView.dragEnterEvent(self.parent_operation_view, event)
+
+    def focusOutEvent(self, event):  # noqa: N802
+        self.finish_input()
+
+    def keyPressEvent(self, key_event):  # noqa: N802
+        if key_event.key() == Qt.Key.Key_Escape:
+            self.finish_input()
+        elif (key_event.key() == Qt.Key.Key_Space and self.text().count('"') != 1) or (
+            self.text().count('"') == 1 and key_event.key() == Qt.Key.Key_QuoteDbl
+        ):
+            if key_event.key() == Qt.Key.Key_QuoteDbl:
+                self.insert('"')
+
+            lower_input = self.text().strip().lower()
+            if lower_input == self.parent_operation_view.operation_desc.text.lower():
+                # ignore this input, as it matches the operation name
+                self.setText("")
+                return
+
+            self.finish_input_with_space(lower_input)
+        elif key_event.key() == Qt.Key.Key_Backspace:
+            if self.text() == "":
+                # move focus to previous input if exists
+                self.finish_input()
+                self.parent_operation_view.focus_previous_input(self.placeholder)
+            else:
+                QLineEdit.keyPressEvent(self, key_event)
+        else:
+            QLineEdit.keyPressEvent(self, key_event)
+
+    def finish_input_with_space(self, lower_input: str):
+        # if it matches an operation name, create the operation in this position
+        # if the new operation is in [or, and] and an input / operation before this
+        # input exists, move it into the new operation as first input,
+        # and delete it from current position
+        if lower_input in ["and", "or", "not"]:
+            new_op_desc: OperationDesc
+            if lower_input == "and":
+                new_op_desc = AndOperationDesc()
+            elif lower_input == "or":
+                new_op_desc = OrOperationDesc()
+            elif lower_input == "not":
+                new_op_desc = NotOperationDesc()
+            else:
+                logger.error("Unknown operation input", input=lower_input)
+                return
+
+            # insert new operation at current position
+            self.parent_operation_view.operation_desc.operations[self.index] = new_op_desc
+            new_op_view = new_op_desc.get_widget(
+                parent=self.parent(), parent_view=self.parent_operation_view
+            )
+
+            # check for existing operation/input before this one
+            has_prev_op = False
+            if self.index > 0 and lower_input in ["and", "or"]:
+                has_prev_op = True
+                prev_op = self.parent_operation_view.operation_desc.operations[self.index - 1]
+                if len(new_op_desc.operations) == 0:
+                    new_op_desc.operations.append(prev_op)
+                else:
+                    new_op_desc.operations[0] = prev_op
+                logger.debug(
+                    "Moving previous operation into new operation",
+                    prev_op=prev_op,
+                    new_op_desc=new_op_desc,
                 )
 
-                value_label = QLabel(value, self.actual_view_container)
-                value_label.setMinimumHeight(28)
-                value_label.setStyleSheet("""
-                    QLabel {
-                        padding: 6px 12px;
-                        border: 2px solid #0078d4;
-                        border-radius: 4px;
-                        background-color: #e3f2fd;
-                        color: #01579b;
-                        font-weight: 600;
-                    }
-                """)
-                value_label.setCursor(Qt.CursorShape.PointingHandCursor)
+                # remove from current position and add to new operation
+                self.parent_operation_view.operation_desc.operations.pop(self.index - 1)
 
-                self.actual_view.addWidget(key_label)
-                self.actual_view.addWidget(colon_label)
-                self.actual_view.addWidget(value_label)
-            case OperationInput(operation=op, operands=operands):
-                # Recreate child widgets from their stored data
-                if op == "NOT":
-                    # NOT always shows the keyword before its single operand
-                    not_label = QLabel("NOT", self.actual_view_container)
-                    not_label.setMinimumHeight(28)
-                    not_label.setStyleSheet("""
-                        QLabel {
-                            padding: 6px 10px;
-                            font-weight: bold;
-                            font-size: 12px;
-                            color: white;
-                            background-color: #d32f2f;
-                            border: 2px solid #b71c1c;
-                            border-radius: 3px;
-                        }
-                    """)
-                    self.actual_view.addWidget(not_label)
-                    # NOT can only have one operand
-                    if len(operands) > 0:
-                        self.actual_view.addWidget(operands[0])
+                # remove widget from layout
+                prev_widget = self.parent_operation_view.content_layout.itemAt(
+                    self.index
+                    + (1 if self.parent_operation_view.operation_desc.show_text else 0)
+                    - 1
+                ).widget()
+                if isinstance(prev_op, OperationDesc) and prev_widget != prev_op.get_widget():
+                    logger.error(
+                        "prev_widget got from index is not prev_op.get_widget()",
+                        prev_widget=prev_widget,
+                        prev_op_get_widget=prev_op.get_widget(),
+                    )
+                if prev_widget is not None:
+                    self.parent_operation_view.content_layout.removeWidget(prev_widget)
+                    prev_widget.setParent(None)
+
+                    new_op_view.content_layout.itemAt(
+                        1 if new_op_desc.show_text else 0
+                    ).widget().setParent(None)
+                    new_op_view.content_layout.insertWidget(
+                        1 if new_op_desc.show_text else 0, prev_widget
+                    )
+                    prev_widget.setParent(new_op_view.content)
+                    if isinstance(prev_op, OperationDesc):
+                        prev_op.parent_widget = new_op_view
+
+                    logger.debug(
+                        "Moved previous widget into new operation",
+                        index=self.index - 1,
+                        index_in_layout=self.index
+                        + (1 if self.parent_operation_view.operation_desc.show_text else 0)
+                        - 1,
+                    )
                 else:
-                    # AND/OR operations show separator between operands
-                    for i, child_field in enumerate(operands):
-                        if i > 0:
-                            # Add operation separator between operands
-                            sep_label = QLabel(op, self.actual_view_container)
-                            sep_label.setMinimumHeight(28)
-                            sep_label.setStyleSheet("""
-                                QLabel {
-                                    padding: 6px 10px;
-                                    font-weight: bold;
-                                    font-size: 12px;
-                                    color: black;
-                                    background-color: #fff59d;
-                                    border: 2px solid #f9a825;
-                                    border-radius: 3px;
-                                }
-                            """)
-                            self.actual_view.addWidget(sep_label)
+                    logger.error(
+                        "Previous widget to move not found",
+                        index=self.index - 1,
+                        index_in_layout=self.index
+                        + (1 if self.parent_operation_view.operation_desc.show_text else 0)
+                        - 1,
+                    )
+                self.index -= 1  # adjust index due to pop
 
-                        self.actual_view.addWidget(child_field)
-            case _:
-                logger.error("Unsupported SearchInputType", operation=self.operation)
+            self.parent_operation_view.content_layout.replaceWidget(self, new_op_view)
+            self.setParent(None)
+            self.deleteLater()
+            self.parent_operation_view.check_filled_positions()
+            if has_prev_op:
+                # focus the new operation's second input
+                new_op_view.focus_next_input(
+                    new_op_view.content_layout.itemAt(1 if new_op_desc.show_text else 0).widget()
+                )
+            else:
+                new_op_view.focus_next_input(None)
+            return
 
-        # Update background color via stylesheet
-        self._updateStyle()
+        self.finish_input()
+        self.parent_operation_view.focus_next_input(self.placeholder)
 
-        # Update geometry to ensure proper size expansion
-        self.updateGeometry()
-        parent = self.parent()
-        if parent and isinstance(parent, BetterSearchFieldView):
-            parent.updateGeometry()
+    def showEvent(self, event):  # noqa: N802
+        self.update_line_width()
+        self.setFocus()
+        self.selectAll()
 
-    def _text_changed(self, text: str):
-        raise NotImplementedError()
 
-    def setText(self, text: str):
+class OperationView(QWidget):
+    operation_desc: OperationDesc
+
+    def __init__(self, operation_desc: OperationDesc, preview: bool, parent=None):
+        super().__init__(parent)
+        self.operation_desc = operation_desc
+        self.operation_desc.widget = self
+        self.preview = preview
+
+        # drag and drop support
+        self.setAcceptDrops(not preview)
+
+        # do not unnecessarily expand to fill available space
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+
+        # Outer layout (no styling here)
+        outer_layout = QHBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # Inner widget that actually gets the green background
+        self.content = QWidget(self)
+
+        self.content_layout = QHBoxLayout(self.content)
+        self.content_layout.setContentsMargins(8, 4, 8, 4)
+        self.content_layout.setSpacing(6)
+
+        self.content.setStyleSheet(
+            f"""
+            background-color: rgb(
+                {operation_desc.color.red()},
+                {operation_desc.color.green()},
+                {operation_desc.color.blue()}
+            );
+            border-radius: 6px;
+            """
+        )
+
+        outer_layout.addWidget(self.content)
+
+        self.render_operation()
+
+    def render_operation(self):
+        if self.operation_desc.show_text:
+            label = QLabel(self.operation_desc.text, self.content)
+            label.setStyleSheet("color: white;")
+            self.content_layout.addWidget(label)
+
+        for op in self.operation_desc.operations:
+            if not isinstance(op, UserInput):
+                op_view = op.get_widget(parent=self.content, parent_view=self)
+                self.content_layout.addWidget(op_view)
+            else:
+                placeholder = self.none_operation()
+                placeholder.setText(op.value)
+                self.content_layout.addWidget(placeholder)
+
+    def none_operation(self):
+        placeholder_style = """
+                            background-color: white;
+                            color: black;
+                            border: 2px dashed gray;
+                            border-radius: 4px;
+                            padding: 0px;
+                            margin: 0px;
+                            """
+        placeholder = QLabel(self.content)
+        placeholder.setFixedSize(50, 20)
+        placeholder.setStyleSheet(placeholder_style)
+        placeholder.setObjectName("input_placeholder")
+
+        # when the text changes, adjust size to fit content
+        def adjust_size_to_content():
+            placeholder.setFixedWidth(
+                max(
+                    placeholder.fontMetrics().horizontalAdvance(placeholder.text()) + 10,
+                    50,
+                )
+            )
+            placeholder.adjustSize()
+
+        def set_text(text: str):
+            QLabel.setText(placeholder, text)
+            adjust_size_to_content()
+
+        placeholder.setText = set_text
+        placeholder.setText("")
+
+        # onclick event, make, that the user can input value
+        # (see UserInput() object, set value there).
+
+        # Get index in operations list by finding placeholder in content_layout
+        # and mapping to operations list
+        def handle_input_click(click_event: QMouseEvent):
+            nonlocal placeholder
+
+            index = self.content_layout.indexOf(placeholder)
+            if self.operation_desc.show_text:
+                index -= 1  # Adjust for label
+            if index < 0 or index >= len(self.operation_desc.operations):
+                logger.error("Clicked placeholder index out of bounds", index=index)
+                return
+            user_input = self.operation_desc.operations[index]
+            if not isinstance(user_input, UserInput):
+                logger.error("Clicked placeholder does not correspond to UserInput", index=index)
+                return
+
+            # Create an qLineEdit over the placeholder, and when enter is pressed or focus is lost,
+            # set the value and remove the qLineEdit
+            line_edit = UserInputLineEdit(placeholder, user_input, index, self)
+
+            self.content_layout.replaceWidget(placeholder, line_edit)
+            placeholder.setParent(None)
+            placeholder.deleteLater()
+
+        placeholder.mousePressEvent = handle_input_click
+        return placeholder
+
+    def focus_next_input(self, current_element: QWidget | None) -> bool:
+        """Focus the next input placeholder after the current_element.
+
+        if it could not be found, return False. Otherwise, return True.
+        """
+        logger.debug("Focusing next input", current_element=current_element)
+        if current_element is None:
+            current_index = 0 if self.operation_desc.show_text else -1
+        else:
+            current_index = self.content_layout.indexOf(current_element)
+
+            if current_index == -1:
+                logger.error(
+                    "Current element not found in content layout",
+                    element=current_element,
+                )
+                return False
+
+        for i in range(current_index + 1, self.content_layout.count()):
+            widget = self.content_layout.itemAt(i).widget()
+            logger.debug("Searching for next input", index=i, widget=widget)
+
+            # if it's a placeholder, focus it
+            if widget is not None and isinstance(widget, QLabel):
+                widget.mousePressEvent(
+                    QMouseEvent(
+                        QMouseEvent.Type.MouseButtonPress,
+                        QPointF(0, 0),
+                        Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+                )
+                logger.debug("Focused next input", index=i)
+                return True
+
+            # if it's an operation, try to focus its first input recursively
+            elif widget is not None and isinstance(widget, OperationView):
+                if widget.focus_next_input(None):
+                    return True
+
+        # if no match found, check parent
+        if self.operation_desc.parent_widget is not None and isinstance(
+            self.operation_desc.parent_widget, OperationView
+        ):
+            logger.debug("No next input found, checking parent operation view")
+            return self.operation_desc.parent_widget.focus_next_input(self)
+        logger.debug(
+            "Am at top-level, no next input found", parent=self.operation_desc.parent_widget
+        )
+        return False
+
+    def focus_previous_input(self, current_element: QWidget | None) -> bool:
+        """Focus the previous input placeholder before the current_element.
+
+        if it could not be found, return False. Otherwise, return True.
+        """
+        logger.debug("Focusing previous input", current_element=current_element)
+        if current_element is None:
+            current_index = self.content_layout.count()
+        else:
+            current_index = self.content_layout.indexOf(current_element)
+
+            if current_index == -1:
+                logger.error(
+                    "Current element not found in content layout",
+                    element=current_element,
+                )
+                return False
+
+        for i in range(current_index - 1, -1, -1):
+            widget = self.content_layout.itemAt(i).widget()
+            logger.debug("Searching for previous input", index=i, widget=widget)
+
+            # if it's a placeholder, focus it
+            if (
+                widget is not None
+                and isinstance(widget, QLabel)
+                and widget.objectName() == "input_placeholder"
+            ):
+                widget.mousePressEvent(
+                    QMouseEvent(
+                        QMouseEvent.Type.MouseButtonPress,
+                        QPointF(0, 0),
+                        Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+                )
+                logger.debug("Focused previous input", index=i, text=widget.text())
+                return True
+
+            # if it's an operation, try to focus its last input recursively
+            elif widget is not None and isinstance(widget, OperationView):
+                if widget.focus_previous_input(None):
+                    return True
+
+        # if no match found, check parent
+        if self.operation_desc.parent_widget is not None and isinstance(
+            self.operation_desc.parent_widget, OperationView
+        ):
+            logger.debug("No previous input found, checking parent operation view")
+            return self.operation_desc.parent_widget.focus_previous_input(self)
+        logger.debug(
+            "Am at top-level, no previous input found", parent=self.operation_desc.parent_widget
+        )
+        return False
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            self.start_drag()
+
+    def to_parsable_text(self):
+        return "todo"
+
+    def start_drag(self):
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        drag.setMimeData(mime_data)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        event.accept()
+
+    def dropEvent(self, event):  # noqa: N802
+        event.accept()
+
+        source_widget = event.source()
+        if source_widget is None or not isinstance(source_widget, OperationView):
+            return
+        source_operation = source_widget.operation_desc
+
+        if source_operation.get_widget() != source_widget:
+            logger.error("Source widget does not match operation's widget")
+            return
+
+        # v3: get the drop position, the user hovered over
+        if not self.content.geometry().contains(self.content.mapFromGlobal(QCursor.pos())):
+            logger.error("Drop position is outside content area")
+            return
+        drop_placeholder = self.content.childAt(self.content.mapFromGlobal(QCursor.pos()))
+        if drop_placeholder is None:
+            logger.error("to Drop placeholder not found [a]")
+            return
+        drop_index = self.content_layout.indexOf(drop_placeholder)
+        if drop_index == -1:
+            logger.error("to Drop index not found [b]")
+            return
+        if self.operation_desc.show_text:
+            drop_index -= 1  # Adjust for label
+        if drop_index < 0:
+            logger.error("to Drop index negative after adjustment [c]")
+            return
+        logger.info("to Drop index found", dropIndex=drop_index)
+
+        ### check for circular references
+        ancestor = self.operation_desc
+        while ancestor is not None:
+            if ancestor == source_operation:
+                logger.error("Cannot drop operation into one of its descendants")
+                return
+            ancestor = (
+                ancestor.parent_widget.operation_desc
+                if (ancestor.parent_widget and isinstance(ancestor.parent_widget, OperationView))
+                else None
+            )
+
+        ### remove from source
+        if not source_widget.preview:
+            source_operation_holder = source_operation.parent_widget
+            soi = source_operation_holder.operation_desc.operations.index(source_operation)
+            if soi == -1:
+                logger.error("Source operation not found in parent's operations")
+                return
+
+            source_operation_holder.operation_desc.operations[soi] = UserInput()
+            none_op = source_operation_holder.none_operation()
+            source_operation_holder.content_layout.replaceWidget(source_widget, none_op)
+
+            source_operation.get_widget().setParent(None)
+        else:
+            # In preview mode, clone the operation
+            source_operation = type(source_operation)()
+            logger.info("Cloning operation for drop", operation=source_operation)
+
+        source_operation.get_widget(parent=self.content, parent_view=self)
+
+        # v1
+        # self.operation_desc.operations.append(sourceOperation)
+        # self.content_layout.addWidget(sourceOperation.getWidget())
+
+        # v2 check for operations that are None
+        # i = 0
+        # while i < len(self.operation_desc.operations):
+        #    if self.operation_desc.operations[i] is None:
+        #        self.operation_desc.operations[i] = sourceOperation
+        #        ogWidget = self.content_layout.itemAt(
+        #            i + (1 if self.operation_desc.show_text else 0)
+        #        ).widget()
+        #        self.content_layout.replaceWidget(
+        #            ogWidget,
+        #            sourceOperation.getWidget(parent=self.content, parent_view=self),
+        #        )
+        #        ogWidget.setParent(None)
+        #        ogWidget.deleteLater()
+        #        break
+        #    i += 1
+        # else:
+        #    self.operation_desc.operations.append(sourceOperation)
+        #    self.content_layout.addWidget(
+        #        sourceOperation.getWidget(parent=self.content, parent_view=self)
+        #    )
+
+        # v3: and insert on drop position.
+        self.content_layout.replaceWidget(
+            drop_placeholder,
+            source_operation.get_widget(parent=self.content, parent_view=self),
+        )
+        drop_placeholder.setParent(None)
+        drop_placeholder.deleteLater()
+        self.operation_desc.operations[drop_index] = source_operation
+
+        self.check_filled_positions()
+
+    def check_filled_positions(self):
+        # After insertion, if all positions are filled, but operationDesc.max_inputs is not reached,
+        # create a new one at the end
+        if (
+            self.operation_desc.max_inputs == -1
+            or len(self.operation_desc.operations) < self.operation_desc.max_inputs
+        ) and (
+            not any(
+                (isinstance(op, UserInput) and op.value.strip() == "")
+                for op in self.operation_desc.operations
+            )
+        ):
+            self.operation_desc.operations.append(UserInput())
+            self.content_layout.addWidget(self.none_operation())
+
+    def __repr__(self):
+        return (
+            f"<OperationView {self.operation_desc.text} children "
+            f"{len(self.operation_desc.operations)} at {hex(id(self))}>"
+        )
+
+
+class SearchFieldPreviews(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.setLayout(QHBoxLayout(self))
+        self.setLayout(self.layout())
+
+        for operation in all_operations():
+            if not operation.in_preview:
+                continue
+            op_view = operation().get_widget(preview=True, parent=self, parent_view=self)
+            self.layout().addWidget(op_view)
+
+
+class BetterSearchField(QWidget):
+    textChanged: Signal = Signal(str)  # noqa: N815
+    returnPressed: Signal = Signal()  # noqa: N815
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.setLayout(QVBoxLayout(self))
+        self.setLayout(self.layout())
+
+        self.layout().addWidget(
+            RootOperation().get_widget(preview=False, parent=self, parent_view=self)
+        )
+        self.layout().addWidget(SearchFieldPreviews(self))
+
+    def setText(self, text: str):  # noqa: N802
         # Set the text in the search field
         pass
 
-    def clear(self):
-        # clear the actual_view widgets only
-        while self.actual_view.count():
-            item = self.actual_view.takeAt(0)
-            widget = item.widget()
-            if widget is not None and not isinstance(widget, BetterSearchField):
-                widget.deleteLater()
-
     def text(self) -> str:
-        # Return the current text in the search field
-        return self.inputField.text()
-
-
-class BetterSearchField(BetterSearchFieldView):
-    def __init__(self, parent=None, data: SearchInputType | None = None, focus: bool = False):
-        super().__init__(parent=parent, data=data, focus=focus)
-        # Connect _text_changed in subclass where it's actually implemented
-        self.inputField.textChanged.connect(self._text_changed)
-
-    def _text_changed(self, text: str):
-        # this doesn't need to parse the ast, to create the view, because this is for live inputting, and should just feel good to type in
-        logger.debug("Search field text changed", text=text)
-        # split by spaces and quoted strings (make a list of SearchFieldToken)
-        tokens: list[SearchFieldToken] = self.parse_text_to_tokens(text)
-        ends_with_space = len(text) > 0 and text[-1].isspace()
-        logger.debug("Parsed tokens", tokens=tokens, ends_with_space=ends_with_space)
-
-        if len(tokens) == 0:
-            return
-        current_token_upper = tokens[0].value.upper()
-        if ends_with_space and len(tokens) == 1 and current_token_upper not in PRECEDENCE:
-            # if len(self.content) == 0 and self.operation is None:
-            if self.operation is None:
-                # create a literal input
-                self.clear()
-                self.operation = OperationInput(
-                    operation="AND",
-                    operands=[
-                        #    LiteralInput(tokens[0].value),
-                        BetterSearchField(parent=self, data=LiteralInput(tokens[0].value)),
-                    ],
-                )
-                self.display()
-                self.inputField.clear()
-                return
-            # elif len(self.content) == 0 and isinstance(self.operation, LiteralInput):
-            elif isinstance(self.operation, LiteralInput):
-                # create an AND operation with the existing literal and the new one
-                self.operation = OperationInput(
-                    operation="AND",
-                    operands=[
-                        # self.operation,
-                        # LiteralInput(tokens[0].value),
-                        BetterSearchField(parent=self, data=self.operation),
-                        BetterSearchField(parent=self, data=LiteralInput(tokens[0].value)),
-                    ],
-                )
-                self.display()
-                self.inputField.clear()
-                return
-            elif isinstance(self.operation, OperationInput):
-                self.operation.operands.append(
-                    # LiteralInput(tokens[0].value)
-                    BetterSearchField(parent=self, data=LiteralInput(tokens[0].value))
-                )
-                self.display()
-                self.inputField.clear()
-                return
-        elif ends_with_space and len(tokens) == 1 and current_token_upper in PRECEDENCE:
-            if isinstance(self.operation, OperationInput):
-                # if self is an operation check what if self, of the operation has precedence
-                if PRECEDENCE.index(current_token_upper) > PRECEDENCE.index(
-                    self.operation.operation
-                ):
-                    # create a new operation with self as operand
-                    self.operation = OperationInput(
-                        operation=cast(Literal["AND", "OR", "NOT"], current_token_upper),
-                        operands=[BetterSearchField(parent=self, data=self.operation)],
-                    )
-                    self.display()
-                    self.inputField.clear()
-                    return
-                else:
-                    # add the operation to self
-                    if current_token_upper == "NOT":
-                        # add new operation - NOT can only have one operand
-                        self.operation.operands.append(
-                            BetterSearchField(
-                                parent=self,
-                                data=OperationInput(
-                                    operation="NOT",
-                                    operands=[],
-                                ),
-                                focus=True,
-                            )
-                        )
-                    else:
-                        # take the last operand and make a new operation with it
-                        if len(self.operation.operands) == 0:
-                            logger.error("No operands to apply operation to")
-                            return
-                        last_operand = self.operation.operands.pop()
-                        new_operation = OperationInput(
-                            operation=cast(Literal["AND", "OR"], current_token_upper),
-                            operands=[last_operand],
-                        )
-                        self.operation.operands.append(
-                            BetterSearchField(parent=self, data=new_operation, focus=True)
-                        )
-                    self.display()
-                    self.inputField.clear()
-                    return
-
-    def parse_text_to_tokens(self, text: str) -> list[SearchFieldToken]:
-        tokens: list[SearchFieldToken] = []
-        current_token = ""
-        in_quotes = False
-        quote_char = ""
-        i = 0
-        while i < len(text):
-            char = text[i]
-            if in_quotes:
-                if char == quote_char:
-                    in_quotes = False
-                    tokens.append(SearchFieldToken(current_token, "quoted_string"))
-                    current_token = ""
-                else:
-                    current_token += char
-            else:
-                if char in ('"', "'"):
-                    if current_token:
-                        tokens.append(SearchFieldToken(current_token, "string"))
-                        current_token = ""
-                    in_quotes = True
-                    quote_char = char
-                elif char.isspace():
-                    if current_token:
-                        tokens.append(SearchFieldToken(current_token, "string"))
-                        current_token = ""
-                else:
-                    current_token += char
-            i += 1
-        if current_token:
-            tokens.append(SearchFieldToken(current_token, "string"))
-        return tokens
-
-
-def localTest():
-    parser = Parser("a and a or b")
-    dat: AST = parser.parse()
-    logger.info("Parsed AST", ast=dat)
-
-
-if __name__ == "__main__":
-    localTest()
+        # Get the current text from the search field
+        return ""
