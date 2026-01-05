@@ -1,7 +1,14 @@
 import structlog
 from PySide6.QtCore import QMimeData, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QDrag, QMouseEvent
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QCursor, QDrag, QMouseEvent, QPainter, QPixmap
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -84,7 +91,11 @@ class UserInput:
 
 class UserInputLineEdit(QLineEdit):
     def __init__(
-        self, placeholder: QLabel, user_input: UserInput, index: int, parent: "OperationView" = None
+        self,
+        placeholder: QLabel,
+        user_input: UserInput,
+        index: int,
+        parent: "OperationView" = None,
     ):
         super().__init__(parent.content)
         self.parent_operation_view = parent
@@ -95,14 +106,7 @@ class UserInputLineEdit(QLineEdit):
         og_text = user_input.value
         self.setText(og_text)
         self.setMinimumSize(50, 20)
-        self.setStyleSheet("""
-                            background-color: white;
-                            color: black;
-                            border: 2px dashed gray;
-                            border-radius: 4px;
-                            padding: 0px;
-                            margin: 0px;
-                            """)
+        self.setProperty("type", "UserInputLineEdit")
 
         # make line_edit not use up all available space, but be only as wide as its content
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -309,16 +313,9 @@ class OperationView(QWidget):
         self.content_layout.setContentsMargins(8, 4, 8, 4)
         self.content_layout.setSpacing(6)
 
-        self.content.setStyleSheet(
-            f"""
-            background-color: rgb(
-                {operation_desc.color.red()},
-                {operation_desc.color.green()},
-                {operation_desc.color.blue()}
-            );
-            border-radius: 6px;
-            """
-        )
+        self.set_style_transparent(False)
+        self.content.setProperty("type", "OperationViewContent")
+        self.setProperty("type", "OperationView")
 
         outer_layout.addWidget(self.content)
 
@@ -327,7 +324,7 @@ class OperationView(QWidget):
     def render_operation(self):
         if self.operation_desc.show_text:
             label = QLabel(self.operation_desc.text, self.content)
-            label.setStyleSheet("color: white;")
+            label.setProperty("type", "OperationLabel")
             self.content_layout.addWidget(label)
 
         for op in self.operation_desc.operations:
@@ -340,17 +337,8 @@ class OperationView(QWidget):
                 self.content_layout.addWidget(placeholder)
 
     def none_operation(self):
-        placeholder_style = """
-                            background-color: white;
-                            color: black;
-                            border: 2px dashed gray;
-                            border-radius: 4px;
-                            padding: 0px;
-                            margin: 0px;
-                            """
         placeholder = QLabel(self.content)
         placeholder.setFixedSize(50, 20)
-        placeholder.setStyleSheet(placeholder_style)
         placeholder.setObjectName("input_placeholder")
 
         # when the text changes, adjust size to fit content
@@ -397,7 +385,8 @@ class OperationView(QWidget):
             placeholder.setParent(None)
             placeholder.deleteLater()
 
-        placeholder.mousePressEvent = handle_input_click
+        if not self.preview:
+            placeholder.mousePressEvent = handle_input_click
         return placeholder
 
     def focus_next_input(self, current_element: QWidget | None) -> bool:
@@ -448,7 +437,8 @@ class OperationView(QWidget):
             logger.debug("No next input found, checking parent operation view")
             return self.operation_desc.parent_widget.focus_next_input(self)
         logger.debug(
-            "Am at top-level, no next input found", parent=self.operation_desc.parent_widget
+            "Am at top-level, no next input found",
+            parent=self.operation_desc.parent_widget,
         )
         return False
 
@@ -504,7 +494,8 @@ class OperationView(QWidget):
             logger.debug("No previous input found, checking parent operation view")
             return self.operation_desc.parent_widget.focus_previous_input(self)
         logger.debug(
-            "Am at top-level, no previous input found", parent=self.operation_desc.parent_widget
+            "Am at top-level, no previous input found",
+            parent=self.operation_desc.parent_widget,
         )
         return False
 
@@ -515,11 +506,59 @@ class OperationView(QWidget):
     def to_parsable_text(self):
         return "todo"
 
+    def get_pix_map(self) -> QPixmap:
+        logger.debug("Generating pixmap for drag preview")
+        pix = self.grab()
+        dpr = getattr(self, "devicePixelRatioF", lambda: 1.0)()
+        border_radius = 6  # magic number from stylesheet
+        radius = border_radius * dpr
+
+        mask = QPixmap(pix.size())
+        mask.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(mask)
+        painter.setBrush(Qt.GlobalColor.white)
+        painter.drawRoundedRect(pix.rect(), radius, radius)
+        painter.end()
+
+        pix.setMask(mask.createMaskFromColor(Qt.GlobalColor.transparent, Qt.MaskMode.MaskInColor))
+        return pix
+
     def start_drag(self):
         drag = QDrag(self)
         mime_data = QMimeData()
         drag.setMimeData(mime_data)
+
+        pix_map = self.get_pix_map()
+
+        drag.setPixmap(pix_map)
+
+        # to set hotspot, calculate cursor position relative to widget
+        cursor_pos = QCursor.pos()
+        widget_pos = self.mapToGlobal(self.rect().topLeft())
+        relative_pos = cursor_pos - widget_pos
+        drag.setHotSpot(relative_pos)
+
+        # make self gray out while dragging
+        if not self.preview:
+            self.set_style_transparent(True)
+
         drag.exec(Qt.DropAction.MoveAction)
+
+    def set_style_transparent(self, transparent: bool):
+        self.content.setStyleSheet(
+            f"""
+            *[type="OperationViewContent"] {{
+                background-color: rgba(
+                    {self.operation_desc.color.red()},
+                    {self.operation_desc.color.green()},
+                    {self.operation_desc.color.blue()},
+                    {128 if transparent else 255}
+                );
+                border-radius: 6px;
+            }}
+            """
+        )
 
     def dragEnterEvent(self, event):  # noqa: N802
         event.accept()
@@ -530,6 +569,7 @@ class OperationView(QWidget):
         source_widget = event.source()
         if source_widget is None or not isinstance(source_widget, OperationView):
             return
+        source_widget.set_style_transparent(False)
         source_operation = source_widget.operation_desc
 
         if source_operation.get_widget() != source_widget:
@@ -653,11 +693,48 @@ class SearchFieldPreviews(QWidget):
         self.setLayout(QHBoxLayout(self))
         self.setLayout(self.layout())
 
+        self.setAcceptDrops(True)
+
         for operation in all_operations():
             if not operation.in_preview:
                 continue
             op_view = operation().get_widget(preview=True, parent=self, parent_view=self)
             self.layout().addWidget(op_view)
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        event.accept()
+
+    def dropEvent(self, event):  # noqa: N802
+        event.accept()
+        # delete the dropped widget, as if this is also a trash can
+        source_widget = event.source()
+        if source_widget is None or not isinstance(source_widget, OperationView):
+            logger.warn("Dropped source is not an OperationView")
+            return
+
+        source_operation = source_widget.operation_desc
+
+        if source_operation.get_widget() != source_widget:
+            logger.error("Source widget does not match operation's widget")
+            return
+
+        if isinstance(source_operation, RootOperation):
+            logger.warn("Cannot delete RootOperation")
+            return
+
+        if source_operation.parent_widget != self:
+            # delete the source_operation's widget
+            source_operation.parent_widget.content_layout.replaceWidget(
+                source_widget,
+                source_operation.parent_widget.none_operation(),
+            )
+            source_widget.setParent(None)
+            source_widget.deleteLater()
+
+            # delete the source_operation from the parent
+            source_operation.parent_widget.operation_desc.operations[
+                source_operation.parent_widget.operation_desc.operations.index(source_operation)
+            ] = UserInput()
 
 
 class BetterSearchField(QWidget):
@@ -669,6 +746,30 @@ class BetterSearchField(QWidget):
 
         self.setLayout(QVBoxLayout(self))
         self.setLayout(self.layout())
+
+        self.setStyleSheet(
+            """
+        QLineEdit[type="UserInputLineEdit"] {
+            background-color: white;
+            color: black;
+            border: 2px dashed gray;
+            border-radius: 4px;
+            padding: 0px;
+            margin: 0px;
+        }
+        QLabel#input_placeholder {
+            background-color: white;
+            color: black;
+            border: 2px dashed gray;
+            border-radius: 4px;
+            padding: 0px;
+            margin: 0px;
+        }
+        QLabel[type="OperationLabel"] {
+            color: white;
+        }
+        """
+        )
 
         self.layout().addWidget(
             RootOperation().get_widget(preview=False, parent=self, parent_view=self)
