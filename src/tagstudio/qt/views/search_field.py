@@ -466,8 +466,68 @@ class UserInputLineEdit(QLineEdit):
             self.finish_input_with_space(lower_input)
         elif key_event.key() == Qt.Key.Key_Backspace:
             if self.text() == "":
-                # move focus to previous input if exists
+                all_same_empty = all(
+                    isinstance(op, UserInput) and op.value.strip() == ""
+                    for op in self.parent_operation_view.operation_desc.operations
+                )
+                if not all_same_empty:
+                    # move focus to previous input if exists
+                    if self.parent_operation_view.focus_previous_input(self):
+                        self.finish_input()
+                else:
+                    # replace this parent, if all inputs are empty, with a user input and focus that
+                    parent_op_view = self.parent_operation_view
+                    parent_parent = parent_op_view.operation_desc.parent_widget
+                    if not isinstance(parent_parent, OperationView):
+                        # cannot delete root
+                        return
+
+                    idx_parent = parent_parent.content_layout.indexOf(parent_op_view)
+                    if parent_parent.operation_desc.show_text:
+                        idx_parent -= 1  # Adjust for label
+                    if idx_parent < 0:
+                        logger.error(
+                            "Parent operation view index out of bounds",
+                            index=idx_parent,
+                            text_adjusted=parent_parent.operation_desc.show_text,
+                        )
+                        return
+                    self.finish_input()
+
+                    new_user_input = UserInput()
+                    parent_parent.operation_desc.operations[idx_parent] = new_user_input
+
+                    new_placeholder = parent_parent.none_operation()
+                    parent_parent.content_layout.replaceWidget(parent_op_view, new_placeholder)
+
+                    parent_op_view.setParent(None)
+                    parent_op_view.deleteLater()
+
+                    parent_parent.check_filled_positions()
+
+                    QTimer.singleShot(
+                        0,
+                        lambda: new_placeholder.mouseReleaseEvent(
+                            QMouseEvent(
+                                QMouseEvent.Type.MouseButtonRelease,
+                                QPointF(0, 0),
+                                Qt.MouseButton.LeftButton,
+                                Qt.MouseButton.LeftButton,
+                                Qt.KeyboardModifier.NoModifier,
+                            )
+                        ),
+                    )
+            else:
+                QLineEdit.keyPressEvent(self, key_event)
+        elif key_event.key() == Qt.Key.Key_Left or key_event.key() == Qt.Key.Key_Home:
+            if self.cursorPosition() == 0:
                 if self.parent_operation_view.focus_previous_input(self):
+                    self.finish_input()
+            else:
+                QLineEdit.keyPressEvent(self, key_event)
+        elif key_event.key() == Qt.Key.Key_Right or key_event.key() == Qt.Key.Key_End:
+            if self.cursorPosition() == len(self.text()):
+                if self.parent_operation_view.focus_next_input(self):
                     self.finish_input()
             else:
                 QLineEdit.keyPressEvent(self, key_event)
