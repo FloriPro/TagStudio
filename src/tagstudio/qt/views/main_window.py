@@ -10,12 +10,11 @@ from pathlib import Path
 import structlog
 from PIL import Image, ImageQt
 from PySide6 import QtCore
-from PySide6.QtCore import QMetaObject, QSize, QStringListModel, Qt
+from PySide6.QtCore import QMetaObject, QSize, Qt
 from PySide6.QtGui import QAction, QColor, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QCompleter,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -527,12 +526,12 @@ class MainWindow(QMainWindow):
         self.central_layout = QGridLayout(self.central_widget)
         self.central_layout.setObjectName("central_layout")
 
-        self.setup_search_bar()
+        self.setup_search_bar(driver)
         self.setup_extra_input_bar()
         self.setup_content(driver)
         self.setCentralWidget(self.central_widget)
 
-    def setup_search_bar(self):
+    def setup_search_bar(self, driver: "QtDriver"):
         """Sets up Nav Buttons, Search Field, Search Button."""
         self.search_bar_layout = QHBoxLayout()
         self.search_bar_layout.setObjectName("search_bar_layout")
@@ -557,7 +556,7 @@ class MainWindow(QMainWindow):
         self.forward_button.setMaximumSize(QSize(32, 16777215))
         self.search_bar_layout.addWidget(self.forward_button)
 
-        self.search_field = BetterSearchField()
+        self.search_field = BetterSearchField(driver.lib)
         self.search_bar_layout.addWidget(self.search_field)
 
         self.search_button = QPushButton(Translations["home.search"], self.central_widget)

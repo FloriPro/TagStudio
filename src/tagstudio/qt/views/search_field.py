@@ -1,5 +1,5 @@
 import structlog
-from PySide6.QtCore import QMimeData, QPointF, QStringListModel, Qt, Signal
+from PySide6.QtCore import QMimeData, QPointF, QStringListModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QDrag, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCompleter,
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tagstudio.core.library.alchemy.library import Library
 from tagstudio.core.query_lang.parser import Parser
 
 logger = structlog.get_logger(__name__)
@@ -41,6 +42,98 @@ def get_nth_item(layout: QLayout, needed_object_name: str | list[str], n: int) -
     return None
 
 
+class InputPlaceholderLabel(QLabel):
+    """Custom QLabel for input placeholders with proper method overrides."""
+
+    def __init__(
+        self,
+        parent: QWidget,
+        operation_view: "OperationView",
+        clickable: bool = True,
+    ) -> None:
+        super().__init__(parent)
+        self.operation_view = operation_view
+        self.clickable = clickable
+        self.setFixedSize(50, 20)
+        self.setObjectName("input_placeholder")
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        super().setText(text)
+        self._adjust_size_to_content()
+
+    def _adjust_size_to_content(self) -> None:
+        self.setFixedWidth(
+            max(
+                self.fontMetrics().horizontalAdvance(self.text()) + 10,
+                50,
+            )
+        )
+        self.adjustSize()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        logger.debug("Showing input placeholder", placeholder=self)
+        index = self.operation_view.content_layout.indexOf(self)
+        if self.operation_view.operation_desc.show_text:
+            index -= 1  # Adjust for label
+        if index < 0 or index >= len(self.operation_view.operation_desc.operations):
+            logger.error(
+                "Show event placeholder index out of bounds",
+                index=index,
+                text_adjusted=self.operation_view.operation_desc.show_text,
+            )
+            return
+        if self.operation_view.operation_desc.has_dropdown(index):
+            logger.debug("Input has dropdown", index=index)
+            self.setProperty("dropdown", "true")
+            self.style().unpolish(self)
+            self.style().polish(self)
+
+    def mouseReleaseEvent(self, release_event: QMouseEvent) -> None:  # noqa: N802
+        if not self.clickable:
+            super().mouseReleaseEvent(release_event)
+            return
+
+        if release_event.button() != Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(release_event)
+            return
+
+        # check if parent was dragged
+        if self.operation_view.dragging:
+            super().mouseReleaseEvent(release_event)
+            return
+
+        release_event.accept()
+
+        holder = self.parent().parent()
+        if not isinstance(holder, OperationView):
+            logger.error("Placeholder's grandparent is not OperationView", parent=holder)
+            return
+
+        index = holder.content_layout.indexOf(self)
+        if holder.operation_desc.show_text:
+            index -= 1  # Adjust for label
+        if index < 0 or index >= len(holder.operation_desc.operations):
+            logger.error(
+                "Clicked placeholder index out of bounds",
+                index=index,
+                text_adjusted=holder.operation_desc.show_text,
+            )
+            return
+        user_input = holder.operation_desc.operations[index]
+        if not isinstance(user_input, UserInput):
+            logger.error("Clicked placeholder does not correspond to UserInput", index=index)
+            return
+
+        # Create a QLineEdit over the placeholder, and when enter is pressed or focus is lost,
+        # set the value and remove the QLineEdit
+        line_edit = UserInputLineEdit(self, user_input, index, holder, self.operation_view.lib)
+
+        holder.content_layout.replaceWidget(self, line_edit)
+        self.setParent(None)
+        self.deleteLater()
+
+
 class OperationDesc:
     in_preview = True
     max_inputs = 0
@@ -53,7 +146,7 @@ class OperationDesc:
 
     operations: list["OperationDesc | UserInput"] = []
     widget: "OperationView | None" = None
-    parent_widget: "OperationView | None" = None
+    parent_widget: "OperationView | BetterSearchField | SearchFieldPreviews" = None
 
     def __init__(self, operations=None) -> None:
         # these are the inputs to this operation
@@ -65,11 +158,27 @@ class OperationDesc:
             for _ in range(self.min_inputs - len(operations)):
                 self.operations.append(UserInput())
 
-    def get_widget(self, preview=False, parent=None, parent_view=None) -> "OperationView":
+    @staticmethod
+    def has_dropdown(index) -> bool:
+        return False
+
+    def calc_dropdown_option(self, lib: "Library", index) -> list[str]:
+        return []
+
+    def get_widget(
+        self,
+        preview=False,
+        parent=None,
+        parent_view: "OperationView | BetterSearchField | SearchFieldPreviews | None" = None,
+    ) -> "OperationView":
         if parent_view is not None:
             self.parent_widget = parent_view
         if self.widget is None:
-            self.widget = OperationView(operation_desc=self, preview=preview, parent=parent)
+            if parent_view is None:
+                raise ValueError("parent_view must be provided for first widget creation")
+            self.widget = OperationView(
+                operation_desc=self, preview=preview, parent=parent, lib=parent_view.lib
+            )
         if self.widget.parent() != parent and parent is not None:
             logger.debug("Reparenting widget", old_parent=self.widget.parent(), new_parent=parent)
             self.widget.setParent(parent)
@@ -131,6 +240,65 @@ class PropertyOperationDesc(OperationDesc):
     color = QColor("#1E90FF")
     allow_recursion = False
 
+    @staticmethod
+    def has_dropdown(index):
+        return index in [0, 1]
+
+    def calc_dropdown_option(self, lib: "Library", index):
+        if index == 0:
+            return [
+                "mediatype",
+                "filetype",
+                "path",
+                "tag",
+                "tag_id",
+                "special",
+            ]
+        elif index == 1:
+            already_input = (
+                self.operations[1].value
+                if isinstance(self.operations[1], UserInput)
+                else "ERROR_RECURSION"
+            )
+            if already_input.startswith('"'):
+                already_input = already_input[1:]
+            if already_input.endswith('"'):
+                already_input = already_input[:-1]
+
+            match self.operations[0].to_text():
+                case "mediatype":
+                    return ["audio", "video", "image", "document"]
+                case "filetype":
+                    return ["mp3", "mp4", "jpg", "png", "pdf", "txt"]
+                case "special":
+                    return ["untagged"]
+                case "tag":
+                    return list(
+                        filter(
+                            lambda e: e.lower().startswith(already_input.lower()),
+                            map(lambda x: x.name, lib.tags),
+                        )
+                    )
+                case "tag_id":
+                    return list(
+                        filter(
+                            lambda e: e.lower().startswith(already_input.lower()),
+                            map(lambda x: str(x.id), lib.tags),
+                        )
+                    )
+                case "path":
+                    return list(
+                        filter(
+                            lambda e: e.lower().startswith(already_input.lower()),
+                            lib.get_paths(limit=100),
+                        )
+                    )
+                case _:
+                    return [
+                        f"Could not find dropdown for property '{self.operations[0].to_text()}'"
+                    ]
+        return ["Unknown dropdown index"]
+
     def to_text(self):
         if len(self.operations) != 2:
             return None
@@ -168,9 +336,37 @@ class UserInput:
         return v
 
 
+class CustomCompleter(QCompleter):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
+        self.setMaxVisibleItems(999)
+
+        self.my_model = QStringListModel()
+        self.my_model.setStringList(["test"])
+        self.setModel(self.my_model)
+        # Set a minimum width for the popup so it's not constrained by the QLineEdit
+        popup = self.popup()
+        if popup:
+            popup.setMinimumWidth(200)  # You can adjust this value as needed
+
+        # also show when no text is entered
+        self.setCompletionPrefix("")
+
+    def update_suggestions(self, suggestions: list):
+        model: QStringListModel = self.my_model
+        model.setStringList(suggestions)
+        # Show the popup with a wider width
+        popup = self.popup()
+        if popup:
+            popup.setMinimumWidth(200)  # Ensure popup stays wide
+        self.complete()
+
+
 class UserInputLineEdit(QLineEdit):
-    my_completer: QCompleter
-    completer_string_list: QStringListModel
+    my_completer: CustomCompleter | None = None
 
     def __init__(
         self,
@@ -178,8 +374,10 @@ class UserInputLineEdit(QLineEdit):
         user_input: UserInput,
         index: int,
         parent: "OperationView",
+        lib: "Library",
     ):
         super().__init__(parent.content)
+        self.lib = lib
         self.parent_operation_view = parent
         self.placeholder = placeholder
         self.user_input = user_input
@@ -199,9 +397,16 @@ class UserInputLineEdit(QLineEdit):
         self.editingFinished.connect(self.finish_input)
         self.returnPressed.connect(self.return_pressed)
         self.textChanged.connect(self.text_updated)
+        self.textEdited.connect(self.text_edited)
+
+        if self.parent_operation_view.operation_desc.has_dropdown(self.index):
+            self.setProperty("dropdown", "true")
 
         self.init_suggestions()
-        self.update_suggestions()
+
+    def text_edited(self, text):
+        # call after a short delay to avoid line edit just closing (finish_input gets called)
+        QTimer.singleShot(1, self.update_suggestions)
 
     def finish_input(self):
         if self.finished_input:
@@ -228,7 +433,6 @@ class UserInputLineEdit(QLineEdit):
         self.adjustSize()
         self.user_input.value = new_text
         self.parent_operation_view.check_filled_positions()
-        self.update_suggestions()
 
     def dragEnterEvent(self, event):  # noqa: N802
         # if a operationView is dragged into this input,
@@ -263,8 +467,8 @@ class UserInputLineEdit(QLineEdit):
         elif key_event.key() == Qt.Key.Key_Backspace:
             if self.text() == "":
                 # move focus to previous input if exists
-                self.finish_input()
-                self.parent_operation_view.focus_previous_input(self.placeholder)
+                if self.parent_operation_view.focus_previous_input(self):
+                    self.finish_input()
             else:
                 QLineEdit.keyPressEvent(self, key_event)
         else:
@@ -395,7 +599,7 @@ class UserInputLineEdit(QLineEdit):
 
             # if PropertyOperationDesc, no previous op handling needed
             if lower_input.endswith(":"):
-                has_prev_op = True
+                has_prev_op = len(lower_input) > 1
 
             self.parent_operation_view.content_layout.replaceWidget(self, new_op_view)
             self.setParent(None)
@@ -422,55 +626,37 @@ class UserInputLineEdit(QLineEdit):
         self.update_line_width()
         self.setFocus()
         self.selectAll()
+        self.update_suggestions()
 
     def return_pressed(self):
         self.finish_input()
         self.parent_operation_view.propagate_return_pressed()
 
     def update_suggestions(self):
-        # Use QCompleter for native suggestions
-        start_suggestions = [
-            "mediatype:",
-            "filetype:",
-            "path:",
-            "tag:",
-            "tag_id:",
-            "special:untagged",
-        ]
+        if not self.my_completer:
+            return
 
-        start_suggestions = [s for s in start_suggestions if s.startswith(self.text())]
-
-        if self.text().startswith("tag:"):
-            start_suggestions += [
-                f'tag:"{tag}"'
-                for tag in ["rock", "pop", "jazz", "classical", "electronic"]
-                if f'tag:"{tag}"'.startswith(self.text())
-            ]
-        if self.text().startswith("tag_id:"):
-            start_suggestions += [self.text() + str(i) for i in range(0, 10)]
-
-        self.completer_string_list.setStringList(start_suggestions)
+        self.my_completer.update_suggestions(
+            self.parent_operation_view.operation_desc.calc_dropdown_option(self.lib, self.index)
+        )
 
     def init_suggestions(self):
-        self.completer_string_list = QStringListModel()
-        self.my_completer = QCompleter(self.completer_string_list, self)
-        self.my_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.my_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        self.setCompleter(self.my_completer)
+        if not self.parent_operation_view.operation_desc.has_dropdown(self.index):
+            self.my_completer = None
+            return
 
-        rec = self.rect()
-        # expand the rect downwards to show more suggestions
-        rec.setHeight(rec.height() + 100)
-        rec.setWidth(rec.width() + 100)
-        self.my_completer.setCompletionPrefix("")
-        self.my_completer.complete(rec)
+        self.my_completer = CustomCompleter(self)
+        self.setCompleter(self.my_completer)
+        self.update_suggestions()
 
 
 class OperationView(QWidget):
     operation_desc: OperationDesc
 
-    def __init__(self, operation_desc: OperationDesc, preview: bool, parent=None):
+    def __init__(self, operation_desc: OperationDesc, preview: bool, lib: "Library", parent=None):
         super().__init__(parent)
+        self.lib = lib
+        self.dragging = False
         self.operation_desc = operation_desc
         self.operation_desc.widget = self
         self.preview = preview
@@ -518,68 +704,13 @@ class OperationView(QWidget):
                 placeholder.setText(op.value)
                 self.content_layout.addWidget(placeholder)
 
-    def none_operation(self):
-        placeholder = QLabel(self.content)
-        placeholder.setFixedSize(50, 20)
-        placeholder.setObjectName("input_placeholder")
-
-        # when the text changes, adjust size to fit content
-        def adjust_size_to_content():
-            placeholder.setFixedWidth(
-                max(
-                    placeholder.fontMetrics().horizontalAdvance(placeholder.text()) + 10,
-                    50,
-                )
-            )
-            placeholder.adjustSize()
-
-        def set_text(text: str):
-            QLabel.setText(placeholder, text)
-            adjust_size_to_content()
-
-        placeholder.setText = set_text
+    def none_operation(self) -> InputPlaceholderLabel:
+        placeholder = InputPlaceholderLabel(
+            parent=self.content,
+            operation_view=self,
+            clickable=not self.preview,
+        )
         placeholder.setText("")
-
-        # onclick event, make, that the user can input value
-        # (see UserInput() object, set value there).
-
-        # Get index in operations list by finding placeholder in content_layout
-        # and mapping to operations list
-        def handle_input_click(click_event: QMouseEvent):
-            click_event.accept()
-            nonlocal placeholder
-
-            holder = placeholder.parent().parent()
-            if not isinstance(holder, OperationView):
-                logger.error("Placeholder's grandparent is not OperationView", parent=holder)
-                return
-
-            index = holder.content_layout.indexOf(placeholder)
-            if holder.operation_desc.show_text:
-                index -= 1  # Adjust for label
-            if index < 0 or index >= len(holder.operation_desc.operations):
-                logger.error(
-                    "Clicked placeholder index out of bounds",
-                    index=index,
-                    text_adjusted=holder.operation_desc.show_text,
-                )
-                return
-            user_input = holder.operation_desc.operations[index]
-            if not isinstance(user_input, UserInput):
-                logger.error("Clicked placeholder does not correspond to UserInput", index=index)
-                return
-
-            # Create an qLineEdit over the placeholder, and when enter is pressed or focus is lost,
-            # set the value and remove the qLineEdit
-            line_edit = UserInputLineEdit(placeholder, user_input, index, holder)
-
-            holder.content_layout.replaceWidget(placeholder, line_edit)
-            placeholder.setParent(None)
-            placeholder.deleteLater()
-
-        if not self.preview:
-            placeholder.mousePressEvent = handle_input_click
-
         return placeholder
 
     def focus_next_input(self, current_element: QWidget | None) -> bool:
@@ -590,12 +721,15 @@ class OperationView(QWidget):
         logger.debug("Focusing next input", current_element=current_element)
         if current_element is None:
             # current_index = 0 if self.operation_desc.show_text else -1
-            current_index = self.content_layout.indexOf(
-                get_nth_item(
-                    self.content_layout,
-                    ["OperationView", "input_placeholder"],
-                    0,
+            current_index = (
+                self.content_layout.indexOf(
+                    get_nth_item(
+                        self.content_layout,
+                        ["OperationView", "input_placeholder"],
+                        0,
+                    )
                 )
+                - 1
             )
         else:
             current_index = self.content_layout.indexOf(current_element)
@@ -613,9 +747,9 @@ class OperationView(QWidget):
 
             # if it's a placeholder, focus it
             if widget is not None and widget.objectName() == "input_placeholder":
-                widget.mousePressEvent(
+                widget.mouseReleaseEvent(
                     QMouseEvent(
-                        QMouseEvent.Type.MouseButtonPress,
+                        QMouseEvent.Type.MouseButtonRelease,
                         QPointF(0, 0),
                         Qt.MouseButton.LeftButton,
                         Qt.MouseButton.LeftButton,
@@ -669,9 +803,9 @@ class OperationView(QWidget):
                 # and isinstance(widget, QLabel)
                 and widget.objectName() == "input_placeholder"
             ):
-                widget.mousePressEvent(
+                widget.mouseReleaseEvent(
                     QMouseEvent(
-                        QMouseEvent.Type.MouseButtonPress,
+                        QMouseEvent.Type.MouseButtonRelease,
                         QPointF(0, 0),
                         Qt.MouseButton.LeftButton,
                         Qt.MouseButton.LeftButton,
@@ -720,6 +854,7 @@ class OperationView(QWidget):
         return pix
 
     def start_drag(self):
+        self.dragging = True
         drag = QDrag(self)
         mime_data = QMimeData()
         drag.setMimeData(mime_data)
@@ -740,6 +875,7 @@ class OperationView(QWidget):
 
         drag.exec(Qt.DropAction.MoveAction)
         self.set_style_transparent(False)
+        self.dragging = False
 
     def set_style_transparent(self, transparent: bool):
         self.content.setStyleSheet(
@@ -838,7 +974,8 @@ class OperationView(QWidget):
 
         # v3: and insert on drop position.
         self.content_layout.replaceWidget(
-            drop_placeholder, source_operation.get_widget(parent=self.content, parent_view=self)
+            drop_placeholder,
+            source_operation.get_widget(parent=self.content, parent_view=self),
         )
         drop_placeholder.setParent(None)
         drop_placeholder.deleteLater()
@@ -914,8 +1051,9 @@ class OperationView(QWidget):
 
 
 class SearchFieldPreviews(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, lib: "Library", parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.lib = lib
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, on=True)
         self.setProperty("type", "SearchFieldPreviews")
 
@@ -993,8 +1131,9 @@ class BetterSearchField(QWidget):
     textChanged: Signal = Signal(str)  # noqa: N815
     returnPressed: Signal = Signal()  # noqa: N815
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, lib: Library, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.lib = lib
 
         self.setLayout(QVBoxLayout(self))
         self.setLayout(self.layout())
@@ -1009,6 +1148,7 @@ class BetterSearchField(QWidget):
             padding: 0px;
             margin: 0px;
         }
+        
         #input_placeholder {
             background-color: white;
             color: black;
@@ -1016,6 +1156,11 @@ class BetterSearchField(QWidget):
             border-radius: 4px;
             padding: 0px;
             margin: 0px;
+        }
+        
+        QLineEdit[type="UserInputLineEdit"][dropdown="true"],
+        #input_placeholder[dropdown="true"] {
+            background-color: rgba(255, 255, 255, 0.7);
         }
         QLabel[type="OperationLabel"] {
             color: white;
@@ -1031,7 +1176,7 @@ class BetterSearchField(QWidget):
             preview=False, parent=self, parent_view=self
         )
         self.layout().addWidget(self.root_operation_view)
-        self.layout().addWidget(SearchFieldPreviews(self))
+        self.layout().addWidget(SearchFieldPreviews(self.lib, self))
 
     def setText(self, text: str):  # noqa: N802
         # Set the text in the search field
