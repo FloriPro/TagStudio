@@ -698,7 +698,6 @@ class UserInputLineEdit(QLineEdit):
     def showEvent(self, event):  # noqa: N802
         self.update_line_width()
         self.setFocus()
-        self.selectAll()
         self.update_suggestions()
 
     def return_pressed(self):
