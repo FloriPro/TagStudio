@@ -234,7 +234,7 @@ class NotOperationDesc(OperationDesc):
 
 class PropertyOperationDesc(OperationDesc):
     in_preview = True
-    max_inputs = 2
+    max_inputs = 3
     min_inputs = 2
     show_text = False
     color = QColor("#1E90FF")
@@ -242,7 +242,7 @@ class PropertyOperationDesc(OperationDesc):
 
     @staticmethod
     def has_dropdown(index):
-        return index in [0, 1]
+        return index in [0, 1, 2]
 
     def calc_dropdown_option(self, lib: "Library", index):
         if index == 0:
@@ -297,16 +297,25 @@ class PropertyOperationDesc(OperationDesc):
                     return [
                         f"Could not find dropdown for property '{self.operations[0].to_text()}'"
                     ]
+        elif index == 2:
+            return self.calc_parameter_options(lib)
         return ["Unknown dropdown index"]
 
+    def calc_parameter_options(self, lib: "Library") -> list[str]:
+        return []
+
     def to_text(self):
-        if len(self.operations) != 2:
+        if len(self.operations) not in [2, 3]:
             return None
         t1 = self.operations[0].to_text()
         t2 = self.operations[1].to_text()
+        t3 = self.operations[2].value if len(self.operations) == 3 else None
         if t1 is None or t2 is None:
             return None
-        return f"{t1}:{t2}"
+        ext = ""
+        if t3 is not None and t3.strip() != "":
+            ext = f"[{t3}]"
+        return f"{t1}:{t2}{ext}"
 
 
 class RootOperation(OperationDesc):
@@ -448,7 +457,11 @@ class UserInputLineEdit(QLineEdit):
         if key_event.key() == Qt.Key.Key_Escape:
             self.finish_input()
         elif (
-            (key_event.key() == Qt.Key.Key_Space and self.text().count('"') != 1)
+            (
+                key_event.key() == Qt.Key.Key_Space
+                and self.text().count('"') != 1
+                and not key_event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            )
             or (self.text().count('"') == 1 and key_event.key() == Qt.Key.Key_QuoteDbl)
             or (key_event.key() == Qt.Key.Key_Colon and self.text().count('"') != 1)
         ):
