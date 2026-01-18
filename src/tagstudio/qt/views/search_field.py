@@ -55,10 +55,15 @@ class InputPlaceholderLabel(QLabel):
         self.operation_view = operation_view
         self.clickable = clickable
         self.setFixedSize(50, 20)
+        self.placeholder = ""
         self.setObjectName("input_placeholder")
 
     def setText(self, text: str) -> None:  # noqa: N802
         super().setText(text)
+        if text == "":
+            self.update_placeholder()
+        else:
+            self.setProperty("placeholder", "false")
         self._adjust_size_to_content()
 
     def _adjust_size_to_content(self) -> None:
@@ -88,6 +93,11 @@ class InputPlaceholderLabel(QLabel):
             self.setProperty("dropdown", "true")
             self.style().unpolish(self)
             self.style().polish(self)
+
+        self.placeholder = self.operation_view.operation_desc.get_placeholder(index)
+        if self.placeholder != "" and self.text() == "":
+            self.setToolTip(self.placeholder)
+            self.update_placeholder()
 
     def mouseReleaseEvent(self, release_event: QMouseEvent) -> None:  # noqa: N802
         if not self.clickable:
@@ -133,6 +143,11 @@ class InputPlaceholderLabel(QLabel):
         self.setParent(None)
         self.deleteLater()
 
+    def update_placeholder(self):
+        super().setText(self.placeholder)
+        self.setProperty("placeholder", "true")
+        self._adjust_size_to_content()
+
 
 class OperationDesc:
     in_preview = True
@@ -157,6 +172,9 @@ class OperationDesc:
         if len(operations) < self.min_inputs:
             for _ in range(self.min_inputs - len(operations)):
                 self.operations.append(UserInput())
+
+    def get_placeholder(self, index) -> str:
+        return ""
 
     @staticmethod
     def has_dropdown(index) -> bool:
@@ -234,11 +252,15 @@ class NotOperationDesc(OperationDesc):
 
 class PropertyOperationDesc(OperationDesc):
     in_preview = True
-    max_inputs = 3
+    max_inputs = 2  # change to 3 to allow optional parameters
     min_inputs = 2
     show_text = False
     color = QColor("#1E90FF")
     allow_recursion = False
+
+    def get_placeholder(self, index):
+        vals = {0: "property", 1: "value", 2: "optional (parameter)"}
+        return vals.get(index, "???")
 
     @staticmethod
     def has_dropdown(index):
@@ -397,6 +419,10 @@ class UserInputLineEdit(QLineEdit):
         self.setMinimumSize(50, 20)
         self.setProperty("type", "UserInputLineEdit")
 
+        self.setPlaceholderText(
+            self.parent_operation_view.operation_desc.get_placeholder(self.index)
+        )
+
         # make line_edit not use up all available space, but be only as wide as its content
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.adjustSize()
@@ -433,6 +459,7 @@ class UserInputLineEdit(QLineEdit):
         self.setFixedWidth(
             max(
                 self.fontMetrics().horizontalAdvance(self.text()) + 10,
+                self.fontMetrics().horizontalAdvance(self.placeholderText()) + 10,
                 50,
             )
         )
@@ -1233,6 +1260,9 @@ class BetterSearchField(QWidget):
         QLineEdit[type="UserInputLineEdit"][dropdown="true"],
         #input_placeholder[dropdown="true"] {
             background-color: rgba(255, 255, 255, 0.7);
+        }
+        #input_placeholder[placeholder="true"] {
+            color: gray;
         }
         QLabel[type="OperationLabel"] {
             color: white;
