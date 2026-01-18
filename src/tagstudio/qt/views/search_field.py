@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from tagstudio.core.library.alchemy.library import Library
 from tagstudio.core.media_types import MediaCategories
+from tagstudio.core.query_lang.ast import AST, ANDList, Constraint, ConstraintType, Not, ORList
 from tagstudio.core.query_lang.parser import Parser
 
 logger = structlog.get_logger(__name__)
@@ -1300,12 +1301,30 @@ class BetterSearchField(QWidget):
 
     def setText(self, text: str):  # noqa: N802
         # Set the text in the search field
-        logger.warning("setText not implemented yet", text=text)
 
         # do nothing if text is the same
         if text == self.text():
             return
-        pass
+
+        # delete existing root operation view
+        old_view = self.root_operation_view
+
+        # parse new text
+        parser = Parser(text)
+        parser_ast = parser.parse()
+        descr = self.build_from_ast(parser_ast)
+        logger.debug("Built operation description from AST", descr=descr, ops=descr.operations)
+        if descr.to_text() is None:
+            descr = UserInput()
+
+        self.root_operation_view = RootOperation([descr]).get_widget(
+            preview=False, parent=self, parent_view=self
+        )
+        self.layout().replaceWidget(old_view, self.root_operation_view)
+        self.check_filled_positions(self.root_operation_view)
+
+        old_view.setParent(None)
+        old_view.deleteLater()
 
     def text(self) -> str:
         # Get the current text from the search field
@@ -1318,3 +1337,55 @@ class BetterSearchField(QWidget):
         logger.info("Parsed text from search field", parsed=parser.parse())
 
         return t
+
+    def build_from_ast(self, parser_ast: AST):
+        logger.debug("Building search field from AST", parser_ast=parser_ast)
+        match parser_ast:
+            case ORList(elements=elements):
+                els = [self.build_from_ast(x) for x in elements]
+                return OrOperationDesc(els)
+
+            case ANDList(terms=elements):
+                els = [self.build_from_ast(x) for x in elements]
+                return AndOperationDesc(els)
+
+            case Constraint(value=value, type=constraint_type, properties=properties):
+                lookup = {
+                    ConstraintType.Tag: "tag",
+                    ConstraintType.TagID: "tag_id",
+                    ConstraintType.MediaType: "mediatype",
+                    ConstraintType.FileType: "filetype",
+                    ConstraintType.Path: "path",
+                    ConstraintType.Special: "special",
+                }
+                if len(properties) == 0:
+                    return PropertyOperationDesc(
+                        [UserInput(lookup.get(constraint_type, "unk")), UserInput(value)]
+                    )
+                props = ", ".join(
+                    prop.key + (f"={prop.value}" if prop.value is not None else "")
+                    for prop in properties
+                )
+                return PropertyOperationDesc(
+                    [
+                        UserInput(lookup.get(constraint_type, "unk")),
+                        UserInput(value),
+                        UserInput(props),
+                    ]
+                )
+
+            case Not(child=element):
+                el = self.build_from_ast(element)
+                return NotOperationDesc([el])
+
+            case _:
+                logger.error("Unsupported AST node for building search field", node=parser_ast)
+                return UserInput()
+
+    def check_filled_positions(self, root_operation_view):
+        root_operation_view.check_filled_positions()
+        for el in root_operation_view.operation_desc.operations:
+            if isinstance(el, OperationDesc):
+                child_view = el.get_widget()
+                if child_view is not None:
+                    self.check_filled_positions(child_view)
