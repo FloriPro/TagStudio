@@ -145,6 +145,8 @@ class InputPlaceholderLabel(QLabel):
         self.deleteLater()
 
     def update_placeholder(self):
+        if self.placeholder == "" or (self.text() != "" and self.text() != self.placeholder):
+            return
         super().setText(self.placeholder)
         self.setProperty("placeholder", "true")
         self._adjust_size_to_content()
