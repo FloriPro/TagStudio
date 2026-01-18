@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from tagstudio.core.library.alchemy.library import Library
+from tagstudio.core.media_types import MediaCategories
 from tagstudio.core.query_lang.parser import Parser
 
 logger = structlog.get_logger(__name__)
@@ -266,7 +267,7 @@ class PropertyOperationDesc(OperationDesc):
     def has_dropdown(index):
         return index in [0, 1, 2]
 
-    def calc_dropdown_option(self, lib: "Library", index):
+    def calc_dropdown_option(self, lib: "Library", index) -> list[str]:
         if index == 0:
             return [
                 "mediatype",
@@ -289,9 +290,20 @@ class PropertyOperationDesc(OperationDesc):
 
             match self.operations[0].to_text():
                 case "mediatype":
-                    return ["audio", "video", "image", "document"]
+                    return [
+                        x.name
+                        for x in MediaCategories.ALL_CATEGORIES
+                        if x.name.startswith(already_input)
+                    ]
                 case "filetype":
-                    return ["mp3", "mp4", "jpg", "png", "pdf", "txt"]
+                    extensions_list: set[str] = set()
+                    for media_cat in MediaCategories.ALL_CATEGORIES:
+                        extensions_list = extensions_list | media_cat.extensions
+                    return [
+                        x.replace(".", "")
+                        for x in sorted(extensions_list)
+                        if x.replace(".", "").startswith(already_input)
+                    ]
                 case "special":
                     return ["untagged"]
                 case "tag":
@@ -1021,10 +1033,11 @@ class OperationView(QWidget):
             return
 
         # v3: get the drop position, the user hovered over
-        if not self.content.geometry().contains(self.content.mapFromGlobal(QCursor.pos())):
+        mouse_position = event.pos()
+        if not self.content.geometry().contains(mouse_position):
             logger.error("Drop position is outside content area")
             return
-        drop_placeholder = self.content.childAt(self.content.mapFromGlobal(QCursor.pos()))
+        drop_placeholder = self.content.childAt(mouse_position)
         if drop_placeholder is None:
             logger.error("to Drop placeholder not found [a]")
             return
@@ -1236,6 +1249,9 @@ class BetterSearchField(QWidget):
 
         self.setLayout(QVBoxLayout(self))
         self.setLayout(self.layout())
+
+        # expand to fill available space horizontally and default vertically
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         self.setStyleSheet(
             """
